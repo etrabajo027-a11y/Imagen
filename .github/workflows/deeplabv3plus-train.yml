@@ -1,0 +1,251 @@
+name: DeepLabV3+ reduced training (5h target)
+
+on:
+  push:
+    paths:
+      - ".github/workflows/deeplabv3plus-train.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deeplabv3plus-reduced-training
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      TRAIN_SAMPLES: "400"
+      VAL_SAMPLES: "100"
+      EPOCHS: "15"
+      IMAGE_WIDTH: "512"
+      IMAGE_HEIGHT: "288"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install remotezip pillow numpy
+
+      - name: Download and prepare 400 train + 100 validation pairs
+        run: |
+          mkdir -p training-data/train/images training-data/train/masks training-data/val/images training-data/val/masks training-results
+          cat > prepare_data.py <<'PY'
+          import json, random, re, time
+          from io import BytesIO
+          from pathlib import PurePosixPath, Path
+          import numpy as np
+          from PIL import Image
+          from remotezip import RemoteZip
+
+          BASE = "http://128.32.162.150/bdd100k/"
+          WIDTH, HEIGHT = 512, 288
+          TRAIN_N, VAL_N = 400, 100
+          def stem(p):
+              return PurePosixPath(p).stem
+          def mask_stem(p):
+              return re.sub(r"_train_id$", "", stem(p), flags=re.I)
+
+          started = time.time()
+          report = {"requested": {"train": TRAIN_N, "val": VAL_N, "size": [WIDTH, HEIGHT], "seed": 42}}
+          with RemoteZip(BASE + "bdd100k_images_10k.zip") as iz, RemoteZip(BASE + "bdd100k_seg_maps.zip") as mz:
+              image_names, mask_names = iz.namelist(), mz.namelist()
+              train_images = [p for p in image_names if p.lower().endswith((".jpg", ".jpeg")) and "/train/" in ("/" + p.lower())]
+              val_images = [p for p in image_names if p.lower().endswith((".jpg", ".jpeg")) and "/val/" in ("/" + p.lower())]
+              train_masks = [p for p in mask_names if p.lower().endswith("_train_id.png") and "/train/" in ("/" + p.lower())]
+              val_masks = [p for p in mask_names if p.lower().endswith("_train_id.png") and "/val/" in ("/" + p.lower())]
+              tmap, vmap = {mask_stem(p): p for p in train_masks}, {mask_stem(p): p for p in val_masks}
+              train_pairs = [(p, tmap[stem(p)]) for p in train_images if stem(p) in tmap]
+              val_pairs = [(p, vmap[stem(p)]) for p in val_images if stem(p) in vmap]
+              if len(train_pairs) != 7000 or len(val_pairs) != 1000:
+                  raise RuntimeError(f"Unexpected BDD100K pairing counts: train={len(train_pairs)}, val={len(val_pairs)}")
+              rng = random.Random(42)
+              rng.shuffle(train_pairs)
+              rng.shuffle(val_pairs)
+              selected = [("train", p) for p in train_pairs[:TRAIN_N]] + [("val", p) for p in val_pairs[:VAL_N]]
+              observed_ids = set()
+              for idx, (split, (ip, mp)) in enumerate(selected, 1):
+                  with Image.open(BytesIO(iz.read(ip))) as im:
+                      im.convert("RGB").resize((WIDTH, HEIGHT), Image.Resampling.BILINEAR).save(
+                          f"training-data/{split}/images/{stem(ip)}.jpg", quality=95)
+                  with Image.open(BytesIO(mz.read(mp))) as mask:
+                      if mask.mode not in ("L", "P", "I", "I;16"):
+                          raise RuntimeError(f"Expected ID mask, got {mask.mode}: {mp}")
+                      arr = np.asarray(mask)
+                      ids = set(int(x) for x in np.unique(arr))
+                      if not ids.issubset(set(range(19)) | {255}):
+                          raise RuntimeError(f"Invalid class IDs in {mp}: {sorted(ids)}")
+                      observed_ids.update(ids)
+                      mask.resize((WIDTH, HEIGHT), Image.Resampling.NEAREST).save(
+                          f"training-data/{split}/masks/{stem(ip)}.png")
+                  if idx % 50 == 0:
+                      print(f"Prepared {idx}/{TRAIN_N + VAL_N} image-mask pairs", flush=True)
+          report.update({
+              "archive_entries": {"images": len(image_names), "masks": len(mask_names)},
+              "available_pairs": {"train": len(train_pairs), "val": len(val_pairs)},
+              "prepared_pairs": {"train": TRAIN_N, "val": VAL_N},
+              "dimensions": [WIDTH, HEIGHT],
+              "mask_ids_found": sorted(observed_ids),
+              "image_resize": "bilinear",
+              "mask_resize": "nearest",
+              "seconds": round(time.time() - started, 2),
+              "status": "PASS"
+          })
+          Path("training-results/data_report.json").write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2), flush=True)
+          PY
+          python prepare_data.py
+
+      - name: Train DeepLabV3+ for 15 epochs
+        run: |
+          cat > train.py <<'PY'
+          import json, os, time, resource, random
+          from pathlib import Path
+          import numpy as np
+          from PIL import Image
+          import torch
+          import torch.nn as nn
+          import torch.nn.functional as F
+          from torch.utils.data import Dataset, DataLoader
+          from torchvision.models import resnet50, ResNet50_Weights
+
+          SEED, EPOCHS = 42, int(os.environ["EPOCHS"])
+          torch.manual_seed(SEED); np.random.seed(SEED); random.seed(SEED)
+          torch.set_num_threads(2)
+
+          class ASPP(nn.Module):
+              def __init__(self):
+                  super().__init__()
+                  self.branches = nn.ModuleList([
+                      nn.Sequential(nn.Conv2d(2048,256,1,bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True)),
+                      *[nn.Sequential(nn.Conv2d(2048,256,3,padding=d,dilation=d,bias=False),
+                          nn.BatchNorm2d(256), nn.ReLU(inplace=True)) for d in (6,12,18)]])
+                  self.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(2048,256,1,bias=False), nn.ReLU(inplace=True))
+                  self.project = nn.Sequential(nn.Conv2d(1280,256,1,bias=False), nn.BatchNorm2d(256),
+                                               nn.ReLU(inplace=True), nn.Dropout(0.1))
+              def forward(self, x):
+                  pooled = F.interpolate(self.pool(x), size=x.shape[-2:], mode="bilinear", align_corners=False)
+                  return self.project(torch.cat([*(b(x) for b in self.branches), pooled], dim=1))
+
+          class DeepLabV3Plus(nn.Module):
+              def __init__(self):
+                  super().__init__()
+                  backbone = resnet50(weights=ResNet50_Weights.DEFAULT,
+                                      replace_stride_with_dilation=[False, False, True])
+                  self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
+                  self.layer1, self.layer2 = backbone.layer1, backbone.layer2
+                  self.layer3, self.layer4 = backbone.layer3, backbone.layer4
+                  self.aspp = ASPP()
+                  self.low = nn.Sequential(nn.Conv2d(256,48,1,bias=False), nn.BatchNorm2d(48), nn.ReLU(inplace=True))
+                  self.decoder = nn.Sequential(
+                      nn.Conv2d(304,256,3,padding=1,bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+                      nn.Conv2d(256,256,3,padding=1,bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+                      nn.Conv2d(256,19,1))
+              def forward(self, x):
+                  size = x.shape[-2:]
+                  x = self.stem(x); low = self.layer1(x)
+                  x = self.layer4(self.layer3(self.layer2(low)))
+                  x = self.aspp(x)
+                  x = F.interpolate(x, size=low.shape[-2:], mode="bilinear", align_corners=False)
+                  x = self.decoder(torch.cat([x, self.low(low)], dim=1))
+                  return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+
+          class BDDDataset(Dataset):
+              def __init__(self, split):
+                  self.images = sorted(Path(f"training-data/{split}/images").glob("*.jpg"))
+                  self.mask_dir = Path(f"training-data/{split}/masks")
+                  if not self.images: raise RuntimeError(f"No {split} images")
+              def __len__(self): return len(self.images)
+              def __getitem__(self, idx):
+                  path = self.images[idx]
+                  image = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
+                  image = (image - np.array([.485,.456,.406], np.float32)) / np.array([.229,.224,.225], np.float32)
+                  mask = np.asarray(Image.open(self.mask_dir / (path.stem + ".png")), dtype=np.int64).copy()
+                  return torch.from_numpy(image.transpose(2,0,1)), torch.from_numpy(mask)
+
+          def evaluate(model, loader, criterion):
+              model.eval(); losses=[]; confusion=torch.zeros((19,19), dtype=torch.int64)
+              with torch.no_grad():
+                  for step, (images, targets) in enumerate(loader, 1):
+                      logits=model(images); losses.append(float(criterion(logits, targets)))
+                      pred=logits.argmax(1).reshape(-1); target=targets.reshape(-1); valid=target != 255
+                      confusion += torch.bincount(19*target[valid] + pred[valid], minlength=19*19).reshape(19,19)
+                      if step % 25 == 0 or step == len(loader):
+                          print(f"  validation {step}/{len(loader)}", flush=True)
+              intersection=confusion.diag().float()
+              union=confusion.sum(0).float()+confusion.sum(1).float()-intersection
+              present=union > 0
+              iou=intersection/union.clamp_min(1)
+              return float(np.mean(losses)), float(iou[present].mean()), float(intersection.sum()/confusion.sum().clamp_min(1)), [None if not bool(present[i]) else float(iou[i]) for i in range(19)]
+
+          def main():
+              out=Path("training-results"); out.mkdir(exist_ok=True)
+              train_loader=DataLoader(BDDDataset("train"), batch_size=1, shuffle=True, num_workers=0)
+              val_loader=DataLoader(BDDDataset("val"), batch_size=1, shuffle=False, num_workers=0)
+              model=DeepLabV3Plus()
+              criterion=nn.CrossEntropyLoss(ignore_index=255)
+              optimizer=torch.optim.Adam(model.parameters(), lr=1e-4)
+              history=[]; best_miou=-1.0; started=time.time()
+              print(f"Configuration: train={len(train_loader.dataset)}, val={len(val_loader.dataset)}, epochs={EPOCHS}, batch=1, size=512x288", flush=True)
+              for epoch in range(1, EPOCHS+1):
+                  epoch_start=time.time(); model.train(); train_losses=[]
+                  for step,(images,targets) in enumerate(train_loader,1):
+                      optimizer.zero_grad(set_to_none=True)
+                      logits=model(images)
+                      loss=criterion(logits,targets)
+                      loss.backward(); optimizer.step()
+                      train_losses.append(float(loss.detach()))
+                      if step % 25 == 0 or step == len(train_loader):
+                          elapsed=time.time()-epoch_start
+                          print(f"EPOCH {epoch}/{EPOCHS} TRAIN {step}/{len(train_loader)} loss={train_losses[-1]:.4f} elapsed={elapsed/60:.1f}min", flush=True)
+                  val_loss, miou, pixel_acc, class_iou=evaluate(model,val_loader,criterion)
+                  row={"epoch":epoch,"train_loss":float(np.mean(train_losses)),"val_loss":val_loss,
+                       "miou":miou,"pixel_accuracy":pixel_acc,"class_iou":class_iou,
+                       "epoch_seconds":round(time.time()-epoch_start,2)}
+                  history.append(row)
+                  torch.save({"epoch":epoch,"model_state_dict":model.state_dict(),
+                              "optimizer_state_dict":optimizer.state_dict(),"metrics":row,
+                              "num_classes":19,"input_size":[512,288]},
+                             out/"deeplabv3plus_last.pth")
+                  if miou > best_miou:
+                      best_miou=miou
+                      torch.save({"epoch":epoch,"model_state_dict":model.state_dict(),
+                                  "optimizer_state_dict":optimizer.state_dict(),"metrics":row,
+                                  "num_classes":19,"input_size":[512,288]},
+                                 out/"deeplabv3plus_best.pth")
+                  (out/"training_history.json").write_text(json.dumps(history,indent=2))
+                  print(f"SUMMARY epoch={epoch}/{EPOCHS} train_loss={row['train_loss']:.4f} val_loss={val_loss:.4f} mIoU={miou:.4f} pixel_acc={pixel_acc:.4f} epoch_min={row['epoch_seconds']/60:.1f}",flush=True)
+              report={"status":"PASS","architecture":"DeepLabV3+ ResNet-50 ImageNet pretrained","train_samples":len(train_loader.dataset),
+                      "validation_samples":len(val_loader.dataset),"epochs_completed":len(history),"best_miou":best_miou,
+                      "final_metrics":history[-1],"total_seconds":round(time.time()-started,2),
+                      "max_rss_mb":round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1)}
+              (out/"training_report.json").write_text(json.dumps(report,indent=2))
+              print("FINAL REPORT\n"+json.dumps(report,indent=2),flush=True)
+          main()
+          PY
+          python train.py
+
+      - name: Upload trained model and metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deeplabv3plus-bdd100k-400train-100val-15epochs
+          path: training-results/
+          if-no-files-found: warn
+          retention-days: 30
