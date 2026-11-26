@@ -1,0 +1,139 @@
+name: BDD100K remote sample test
+
+on:
+  push:
+    paths:
+      - ".github/workflows/bdd100k-remote-sample.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-remote-bdd100k:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install inspection tools
+        run: python -m pip install --upgrade pip remotezip pillow requests
+      - name: Inspect BDD100K archives and validate 50 real image-mask pairs
+        run: |
+          python - <<'PY'
+          import json, re, time
+          from collections import Counter
+          from io import BytesIO
+          from pathlib import PurePosixPath
+          import requests
+          from PIL import Image
+          from remotezip import RemoteZip
+
+          base = "http://128.32.162.150/bdd100k/"
+          archives = ["bdd100k_images_10k.zip", "bdd100k_seg_maps.zip", "bdd100k_labels.zip"]
+          report = {"base_url": base, "archives": {}, "sample_pairs_checked": 0, "errors": []}
+
+          for name in archives:
+              url = base + name
+              try:
+                  h = requests.head(url, allow_redirects=True, timeout=25)
+                  report["archives"][name] = {
+                      "head_status": h.status_code,
+                      "content_length": h.headers.get("Content-Length"),
+                      "accept_ranges": h.headers.get("Accept-Ranges"),
+                      "content_type": h.headers.get("Content-Type")
+                  }
+                  print(f"{name}: HTTP {h.status_code}, bytes={h.headers.get('Content-Length')}, ranges={h.headers.get('Accept-Ranges')}")
+              except Exception as e:
+                  report["errors"].append(f"HEAD {name}: {type(e).__name__}: {e}")
+
+          def entries_for(name):
+              return list(RemoteZip(base + name).namelist())
+
+          try:
+              image_names = entries_for("bdd100k_images_10k.zip")
+              report["archives"]["bdd100k_images_10k.zip"]["entry_count"] = len(image_names)
+              imgs = [n for n in image_names if n.lower().endswith((".jpg", ".jpeg")) and "/train/" in ("/" + n.lower())]
+              print("Image entries:", len(image_names), "| train JPG:", len(imgs), "| examples:", imgs[:3])
+          except Exception as e:
+              raise RuntimeError("No se pudo leer el ZIP remoto de imágenes mediante HTTP Range. " + repr(e))
+
+          mask_archive = None
+          mask_names = []
+          for candidate in ["bdd100k_seg_maps.zip", "bdd100k_labels.zip"]:
+              try:
+                  names = entries_for(candidate)
+                  report["archives"][candidate]["entry_count"] = len(names)
+                  candidates = [n for n in names if n.lower().endswith(".png") and ("train" in n.lower())]
+                  print(candidate, "entries:", len(names), "| PNG train:", len(candidates), "| examples:", candidates[:3])
+                  if candidates:
+                      mask_archive, mask_names = candidate, candidates
+              except Exception as e:
+                  report["errors"].append(f"ZIP index {candidate}: {type(e).__name__}: {e}")
+
+          if not mask_archive:
+              raise RuntimeError("No se encontró ningún ZIP con máscaras PNG de train. Revisa el informe de nombres de archivo.")
+
+          def key(path):
+              stem = PurePosixPath(path).stem
+              stem = re.sub(r"_train_id$", "", stem, flags=re.I)
+              stem = re.sub(r"_train_color$", "", stem, flags=re.I)
+              return stem
+
+          masks_by_key = {}
+          for n in mask_names:
+              masks_by_key.setdefault(key(n), n)
+          pairs = [(n, masks_by_key[key(n)]) for n in imgs if key(n) in masks_by_key]
+          report["mask_archive_used"] = mask_archive
+          report["image_train_count_in_zip"] = len(imgs)
+          report["mask_train_count_in_zip"] = len(mask_names)
+          report["matched_pairs_available"] = len(pairs)
+          print("Matched image-mask pairs:", len(pairs))
+
+          if not pairs:
+              raise RuntimeError("Los nombres de imagen y máscara no coinciden con la regla de emparejamiento del Notebook 1.")
+
+          checked = []
+          classes = Counter()
+          with RemoteZip(base + "bdd100k_images_10k.zip") as iz, RemoteZip(base + mask_archive) as mz:
+              for image_name, mask_name in pairs[:50]:
+                  image_bytes = iz.read(image_name)
+                  mask_bytes = mz.read(mask_name)
+                  with Image.open(BytesIO(image_bytes)) as im:
+                      im.verify()
+                  with Image.open(BytesIO(mask_bytes)) as m:
+                      m.load()
+                      vals = Counter(m.getdata())
+                      classes.update(vals.keys())
+                      checked.append({
+                          "image": image_name, "mask": mask_name,
+                          "image_size_bytes": len(image_bytes),
+                          "mask_size_bytes": len(mask_bytes),
+                          "image_dimensions": list(Image.open(BytesIO(image_bytes)).size),
+                          "mask_dimensions": list(m.size),
+                          "mask_mode": m.mode,
+                          "mask_values_sample": sorted(vals)[:30]
+                      })
+
+          report["sample_pairs_checked"] = len(checked)
+          report["mask_values_observed"] = sorted(int(x) for x in classes)
+          report["sample"] = checked
+          report["result"] = "PASS" if len(checked) == 50 else "PARTIAL"
+          import os
+          os.makedirs("bdd100k-report", exist_ok=True)
+          with open("bdd100k-report/remote_sample_report.json", "w") as f:
+              json.dump(report, f, indent=2)
+          print("\nRESULT:", report["result"])
+          print("Pairs validated:", len(checked))
+          print("Mask values observed:", report["mask_values_observed"])
+          PY
+      - name: Upload remote sample report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdd100k-remote-sample-report
+          path: bdd100k-report/
+          if-no-files-found: warn
+          retention-days: 30
