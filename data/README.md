@@ -3,21 +3,19 @@
 ## Dataset seleccionado
 
 BDD100K es el conjunto principal del proyecto. Fuente oficial: https://dl.cv.ethz.ch/bdd100k/data/  
-Documentación de descargas, tamaños, checksums y estructura: https://github.com/bdd100k/bdd100k/blob/master/doc/source/download.rst
+Documentación oficial de descargas, tamaños, checksums y estructura: https://github.com/bdd100k/bdd100k/blob/master/doc/source/download.rst
 
 Al descargar se aceptan las condiciones oficiales de licencia/uso. No se redistribuyen los archivos de datos en este repositorio.
 
 ## Paquetes para el primer flujo
 
-Para **segmentación semántica** e **instancias** se requieren:
+Para **segmentación semántica** e **instancias** se requieren estos tres paquetes oficiales:
 
-- `10k_images_train.zip`
-- `10k_images_val.zip`
-- `10k_images_test.zip`
-- `bdd100k_sem_seg_labels_trainval.zip` (MD5 documentado: `9a2968dde3345eeb689cffb1e26f9c78`)
-- `bdd100k_ins_seg_labels_trainval.zip` (MD5 documentado: `651b41f229d7327d8c4af97772de4390`)
+- `bdd100k_images_10k.zip` (MD5: `08f26aecceda982568063d3d5873378e`)
+- `bdd100k_sem_seg_labels_trainval.zip` (MD5: `9a2968dde3345eeb689cffb1e26f9c78`)
+- `bdd100k_ins_seg_labels_trainval.zip` (MD5: `651b41f229d7327d8c4af97772de4390`)
 
-Los ZIP de etiquetas contienen máscaras y anotaciones para train/val; test no necesariamente tiene etiquetas públicas para estas tareas. No descargar los videos de 1.8 TB para este flujo.
+**Corrección importante:** BDD100K publica un solo ZIP de imágenes 10K, que contiene los directorios train/val/test. No se descargan tres archivos separados llamados `10k_images_train.zip`, `10k_images_val.zip` y `10k_images_test.zip`. No descargar los videos de 1.8 TB para este flujo.
 
 ## Diferencia importante entre tareas
 
@@ -37,4 +35,4 @@ La documentación indica atributos `weather`, `scene` y `timeofday` en los JSON 
 
 Abrir en Colab: https://colab.research.google.com/github/etrabajo027-a11y/Imagen/blob/main/notebooks/01_exploracion_datos.ipynb
 
-El notebook descarga, verifica los checksums de etiquetas, extrae y explora la estructura. Los datos se guardan en Google Drive y no se versionan en Git.
+El notebook descarga los tres paquetes, verifica sus checksums MD5, extrae y explora la estructura. Los datos se guardan en Google Drive y no se versionan en Git.
