@@ -1,4 +1,4 @@
-name: BDD100K remote sample test
+name: BDD100K end-to-end readiness test
 
 on:
   push:
@@ -10,130 +10,236 @@ permissions:
   contents: read
 
 jobs:
-  inspect-remote-bdd100k:
+  end-to-end-pilot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
+    env:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      PILOT_TRAIN: "100"
+      PILOT_VAL: "20"
+      IMAGE_WIDTH: "512"
+      IMAGE_HEIGHT: "288"
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install inspection tools
-        run: python -m pip install --upgrade pip remotezip pillow requests
-      - name: Inspect BDD100K archives and validate 50 real image-mask pairs
+
+      - name: Install CPU PyTorch and data tools
         run: |
-          python - <<'PY'
-          import json, re, time
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install remotezip pillow numpy requests
+
+      - name: Download selected BDD100K pairs, validate splits and preprocess
+        run: |
+          mkdir -p pilot-data/train/images pilot-data/train/masks pilot-data/val/images pilot-data/val/masks pilot-results
+          cat > /tmp/pilot.py <<'PY'
+          import json, random, re, time, traceback
           from collections import Counter
           from io import BytesIO
           from pathlib import PurePosixPath
-          import requests
+          from pathlib import Path
+          import numpy as np
           from PIL import Image
           from remotezip import RemoteZip
 
-          base = "http://128.32.162.150/bdd100k/"
-          archives = ["bdd100k_images_10k.zip", "bdd100k_seg_maps.zip", "bdd100k_labels.zip"]
-          report = {"base_url": base, "archives": {}, "sample_pairs_checked": 0, "errors": []}
-
-          for name in archives:
-              url = base + name
-              try:
-                  h = requests.head(url, allow_redirects=True, timeout=25)
-                  report["archives"][name] = {
-                      "head_status": h.status_code,
-                      "content_length": h.headers.get("Content-Length"),
-                      "accept_ranges": h.headers.get("Accept-Ranges"),
-                      "content_type": h.headers.get("Content-Type")
-                  }
-                  print(f"{name}: HTTP {h.status_code}, bytes={h.headers.get('Content-Length')}, ranges={h.headers.get('Accept-Ranges')}")
-              except Exception as e:
-                  report["errors"].append(f"HEAD {name}: {type(e).__name__}: {e}")
-
-          def entries_for(name):
-              return list(RemoteZip(base + name).namelist())
-
+          BASE = "http://128.32.162.150/bdd100k/"
+          IMAGE_ZIP = BASE + "bdd100k_images_10k.zip"
+          MASK_ZIP = BASE + "bdd100k_seg_maps.zip"
+          report = {"stages": {}, "errors": [], "config": {"train": 100, "val": 20, "size": [512, 288], "seed": 42}}
+          def key(p):
+              return PurePosixPath(p).stem
+          def mask_key(p):
+              return re.sub(r"_train_id$", "", PurePosixPath(p).stem, flags=re.I)
           try:
-              image_names = entries_for("bdd100k_images_10k.zip")
-              report["archives"]["bdd100k_images_10k.zip"]["entry_count"] = len(image_names)
-              imgs = [n for n in image_names if n.lower().endswith((".jpg", ".jpeg")) and "/train/" in ("/" + n.lower())]
-              print("Image entries:", len(image_names), "| train JPG:", len(imgs), "| examples:", imgs[:3])
+              t0 = time.time()
+              with RemoteZip(IMAGE_ZIP) as iz, RemoteZip(MASK_ZIP) as mz:
+                  image_names = iz.namelist()
+                  mask_names = mz.namelist()
+                  train_imgs = [n for n in image_names if n.lower().endswith((".jpg", ".jpeg")) and "/train/" in ("/"+n.lower())]
+                  val_imgs = [n for n in image_names if n.lower().endswith((".jpg", ".jpeg")) and "/val/" in ("/"+n.lower())]
+                  train_masks = [n for n in mask_names if n.lower().endswith("_train_id.png") and "/train/" in ("/"+n.lower())]
+                  val_masks = [n for n in mask_names if n.lower().endswith("_train_id.png") and "/val/" in ("/"+n.lower())]
+                  report["archive_index"] = {"images_entries": len(image_names), "mask_entries": len(mask_names),
+                      "train_images": len(train_imgs), "val_images": len(val_imgs),
+                      "train_id_masks": len(train_masks), "val_id_masks": len(val_masks)}
+                  train_map = {mask_key(m): m for m in train_masks}
+                  val_map = {mask_key(m): m for m in val_masks}
+                  train_pairs = [(i, train_map[key(i)]) for i in train_imgs if key(i) in train_map]
+                  val_pairs = [(i, val_map[key(i)]) for i in val_imgs if key(i) in val_map]
+                  report["matched_pairs"] = {"train": len(train_pairs), "val": len(val_pairs)}
+                  if len(train_pairs) < 100 or len(val_pairs) < 20:
+                      raise RuntimeError(f"Insufficient matched pairs: train={len(train_pairs)}, val={len(val_pairs)}")
+                  rng = random.Random(42)
+                  rng.shuffle(train_pairs); rng.shuffle(val_pairs)
+                  selected = [("train", p) for p in train_pairs[:100]] + [("val", p) for p in val_pairs[:20]]
+                  observed = set()
+                  for split, (iname, mname) in selected:
+                      ib = iz.read(iname); mb = mz.read(mname)
+                      with Image.open(BytesIO(ib)) as im:
+                          im = im.convert("RGB")
+                          original_size = im.size
+                          im = im.resize((512, 288), Image.Resampling.BILINEAR)
+                          im.save(f"pilot-data/{split}/images/{key(iname)}.jpg", quality=95)
+                      with Image.open(BytesIO(mb)) as mm:
+                          mm.load()
+                          if mm.mode not in ("L", "P", "I", "I;16"):
+                              raise RuntimeError(f"Mask must contain class IDs, got mode={mm.mode}: {mname}")
+                          arr = np.asarray(mm)
+                          vals = set(int(v) for v in np.unique(arr))
+                          if not vals.issubset(set(range(19)) | {255}):
+                              raise RuntimeError(f"Unexpected mask IDs {sorted(vals)} in {mname}")
+                          observed.update(vals)
+                          mm = mm.resize((512, 288), Image.Resampling.NEAREST)
+                          mm.save(f"pilot-data/{split}/masks/{key(iname)}.png")
+                          if Image.open(f"pilot-data/{split}/images/{key(iname)}.jpg").size != (512,288):
+                              raise RuntimeError("Image resize check failed")
+                          if Image.open(f"pilot-data/{split}/masks/{key(iname)}.png").size != (512,288):
+                              raise RuntimeError("Mask resize check failed")
+                  report["preprocessing"] = {"selected_train": 100, "selected_val": 20,
+                      "target_dimensions": [512,288], "mask_ids_observed": sorted(observed),
+                      "mask_interpolation": "nearest", "image_interpolation": "bilinear"}
+                  report["stages"]["remote_download_pairing_preprocessing"] = "PASS"
+                  report["data_stage_seconds"] = round(time.time()-t0, 2)
+              Path("pilot-results").mkdir(exist_ok=True)
+              Path("pilot-results/data_report.json").write_text(json.dumps(report, indent=2))
+              print(json.dumps(report, indent=2))
           except Exception as e:
-              raise RuntimeError("No se pudo leer el ZIP remoto de imágenes mediante HTTP Range. " + repr(e))
-
-          mask_archive = None
-          mask_names = []
-          for candidate in ["bdd100k_seg_maps.zip", "bdd100k_labels.zip"]:
-              try:
-                  names = entries_for(candidate)
-                  report["archives"][candidate]["entry_count"] = len(names)
-                  candidates = [n for n in names if n.lower().endswith("_train_id.png")]
-                  print(candidate, "entries:", len(names), "| PNG train:", len(candidates), "| examples:", candidates[:3])
-                  if candidates:
-                      mask_archive, mask_names = candidate, candidates
-              except Exception as e:
-                  report["errors"].append(f"ZIP index {candidate}: {type(e).__name__}: {e}")
-
-          if not mask_archive:
-              raise RuntimeError("No se encontró ningún ZIP con máscaras PNG de train. Revisa el informe de nombres de archivo.")
-
-          def key(path):
-              stem = PurePosixPath(path).stem
-              stem = re.sub(r"_train_id$", "", stem, flags=re.I)
-              stem = re.sub(r"_train_color$", "", stem, flags=re.I)
-              return stem
-
-          masks_by_key = {}
-          for n in mask_names:
-              masks_by_key.setdefault(key(n), n)
-          pairs = [(n, masks_by_key[key(n)]) for n in imgs if key(n) in masks_by_key]
-          report["mask_archive_used"] = mask_archive
-          report["image_train_count_in_zip"] = len(imgs)
-          report["mask_train_count_in_zip"] = len(mask_names)
-          report["matched_pairs_available"] = len(pairs)
-          print("Matched image-mask pairs:", len(pairs))
-
-          if not pairs:
-              raise RuntimeError("Los nombres de imagen y máscara no coinciden con la regla de emparejamiento del Notebook 1.")
-
-          checked = []
-          classes = Counter()
-          with RemoteZip(base + "bdd100k_images_10k.zip") as iz, RemoteZip(base + mask_archive) as mz:
-              for image_name, mask_name in pairs[:50]:
-                  image_bytes = iz.read(image_name)
-                  mask_bytes = mz.read(mask_name)
-                  with Image.open(BytesIO(image_bytes)) as im:
-                      im.verify()
-                  with Image.open(BytesIO(mask_bytes)) as m:
-                      m.load()
-                      vals = Counter(m.getdata())
-                      classes.update(vals.keys())
-                      checked.append({
-                          "image": image_name, "mask": mask_name,
-                          "image_size_bytes": len(image_bytes),
-                          "mask_size_bytes": len(mask_bytes),
-                          "image_dimensions": list(Image.open(BytesIO(image_bytes)).size),
-                          "mask_dimensions": list(m.size),
-                          "mask_mode": m.mode,
-                          "mask_values_sample": sorted(vals)[:30]
-                      })
-
-          report["sample_pairs_checked"] = len(checked)
-          report["mask_values_observed"] = sorted(classes)
-          report["sample"] = checked
-          report["result"] = "PASS" if len(checked) == 50 else "PARTIAL"
-          import os
-          os.makedirs("bdd100k-report", exist_ok=True)
-          with open("bdd100k-report/remote_sample_report.json", "w") as f:
-              json.dump(report, f, indent=2)
-          print("\nRESULT:", report["result"])
-          print("Pairs validated:", len(checked))
-          print("Mask values observed:", report["mask_values_observed"])
+              report["errors"].append(f"{type(e).__name__}: {e}")
+              Path("pilot-results").mkdir(exist_ok=True)
+              Path("pilot-results/data_report.json").write_text(json.dumps(report, indent=2))
+              traceback.print_exc()
+              raise
           PY
-      - name: Upload remote sample report
+          python /tmp/pilot.py
+
+      - name: Run real DeepLabV3+ forward, loss, backward, optimizer and validation
+        run: |
+          cat > /tmp/train_pilot.py <<'PY'
+          import json, os, time, resource, traceback
+          from pathlib import Path
+          import numpy as np
+          from PIL import Image
+          import torch
+          import torch.nn as nn
+          import torch.nn.functional as F
+          from torch.utils.data import Dataset, DataLoader
+          from torchvision.models import resnet50, ResNet50_Weights
+
+          class ASPP(nn.Module):
+              def __init__(self):
+                  super().__init__()
+                  self.branches = nn.ModuleList([
+                      nn.Sequential(nn.Conv2d(2048,256,1,bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True)),
+                      *[nn.Sequential(nn.Conv2d(2048,256,3,padding=d,dilation=d,bias=False),
+                          nn.BatchNorm2d(256), nn.ReLU(inplace=True)) for d in (6,12,18)]])
+                  self.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(2048,256,1,bias=False), nn.ReLU(inplace=True))
+                  self.project = nn.Sequential(nn.Conv2d(1280,256,1,bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True), nn.Dropout(0.1))
+              def forward(self,x):
+                  p=F.interpolate(self.pool(x),size=x.shape[-2:],mode="bilinear",align_corners=False)
+                  return self.project(torch.cat([*(b(x) for b in self.branches),p],1))
+
+          class DeepLabV3Plus(nn.Module):
+              def __init__(self):
+                  super().__init__()
+                  b=resnet50(weights=ResNet50_Weights.DEFAULT, replace_stride_with_dilation=[False,False,True])
+                  self.stem=nn.Sequential(b.conv1,b.bn1,b.relu,b.maxpool)
+                  self.layer1,self.layer2,self.layer3,self.layer4=b.layer1,b.layer2,b.layer3,b.layer4
+                  self.aspp=ASPP()
+                  self.low=nn.Sequential(nn.Conv2d(256,48,1,bias=False),nn.BatchNorm2d(48),nn.ReLU(inplace=True))
+                  self.decoder=nn.Sequential(nn.Conv2d(304,256,3,padding=1,bias=False),nn.BatchNorm2d(256),nn.ReLU(inplace=True),
+                      nn.Conv2d(256,256,3,padding=1,bias=False),nn.BatchNorm2d(256),nn.ReLU(inplace=True),nn.Conv2d(256,19,1))
+              def forward(self,x):
+                  size=x.shape[-2:]; x=self.stem(x); low=self.layer1(x)
+                  x=self.layer4(self.layer3(self.layer2(low))); x=self.aspp(x)
+                  x=F.interpolate(x,size=low.shape[-2:],mode="bilinear",align_corners=False)
+                  x=self.decoder(torch.cat([x,self.low(low)],1))
+                  return F.interpolate(x,size=size,mode="bilinear",align_corners=False)
+
+          class BDD(Dataset):
+              def __init__(self,split):
+                  self.ims=sorted(Path(f"pilot-data/{split}/images").glob("*.jpg"))
+                  self.root=Path(f"pilot-data/{split}/masks")
+                  if not self.ims: raise RuntimeError(f"No {split} images found")
+              def __len__(self): return len(self.ims)
+              def __getitem__(self,i):
+                  p=self.ims[i]
+                  x=np.asarray(Image.open(p).convert("RGB"),dtype=np.float32)/255.
+                  x=(x-np.array([.485,.456,.406],dtype=np.float32))/np.array([.229,.224,.225],dtype=np.float32)
+                  y=np.asarray(Image.open(self.root/(p.stem+".png")),dtype=np.int64).copy()
+                  return torch.from_numpy(x.transpose(2,0,1)),torch.from_numpy(y)
+
+          def main():
+              torch.set_num_threads(2); torch.manual_seed(42)
+              report={"device":"cpu","torch":torch.__version__,"train_samples":0,"val_samples":0}
+              start=time.time()
+              try:
+                  train=DataLoader(BDD("train"),batch_size=1,shuffle=True,num_workers=0)
+                  val=DataLoader(BDD("val"),batch_size=1,shuffle=False,num_workers=0)
+                  report["train_samples"],report["val_samples"]=len(train.dataset),len(val.dataset)
+                  model=DeepLabV3Plus()
+                  report["pretrained_resnet50"]="ImageNet DEFAULT weights loaded"
+                  criterion=nn.CrossEntropyLoss(ignore_index=255)
+                  optimizer=torch.optim.Adam(model.parameters(),lr=1e-4)
+                  model.train(); losses=[]; step_times=[]
+                  for x,y in train:
+                      t=time.perf_counter()
+                      optimizer.zero_grad(set_to_none=True)
+                      logits=model(x)
+                      if logits.shape != (1,19,288,512): raise RuntimeError(f"Unexpected output shape {logits.shape}")
+                      loss=criterion(logits,y); loss.backward(); optimizer.step()
+                      losses.append(float(loss.detach())); step_times.append(time.perf_counter()-t)
+                      if len(losses)%10==0: print(f"TRAIN {len(losses)}/{len(train)} loss={losses[-1]:.4f}")
+                  report["stages"]={"forward_backward_optimizer":"PASS"}
+                  model.eval(); val_losses=[]; conf=torch.zeros((19,19),dtype=torch.int64)
+                  with torch.no_grad():
+                      for idx,(x,y) in enumerate(val,1):
+                          logits=model(x); loss=criterion(logits,y); val_losses.append(float(loss))
+                          pred=logits.argmax(1).view(-1); target=y.view(-1); valid=target!=255
+                          bins=torch.bincount(19*target[valid]+pred[valid],minlength=19*19)
+                          conf += bins.reshape(19,19)
+                          print(f"VAL {idx}/{len(val)} loss={val_losses[-1]:.4f}")
+                  inter=conf.diag().float(); union=conf.sum(0).float()+conf.sum(1).float()-inter
+                  iou=inter/union.clamp_min(1); present=union>0
+                  report["metrics"]={"train_loss_mean":sum(losses)/len(losses),"val_loss_mean":sum(val_losses)/len(val_losses),
+                      "pixel_accuracy":float(inter.sum()/conf.sum().clamp_min(1)),
+                      "miou_present_classes":float(iou[present].mean()),"classes_present":int(present.sum()),
+                      "class_iou": [None if not bool(present[i]) else float(iou[i]) for i in range(19)]}
+                  report["timing"]={"train_seconds":round(sum(step_times),2),"mean_seconds_per_train_step":round(sum(step_times)/len(step_times),3),
+                      "validation_seconds":round(time.time()-start-sum(step_times),2),"total_seconds":round(time.time()-start,2),
+                      "estimated_hours_800_train_30_epochs":round((sum(step_times)/len(step_times))*800*30/3600,2)}
+                  report["max_rss_mb"]=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1)
+                  Path("pilot-results/deeplabv3plus_pilot_best.pth").parent.mkdir(exist_ok=True)
+                  torch.save({"model_state_dict":model.state_dict(),"optimizer_state_dict":optimizer.state_dict(),
+                      "num_classes":19,"input_size":[512,288],"pilot_metrics":report["metrics"]},
+                      "pilot-results/deeplabv3plus_pilot_best.pth")
+                  report["checkpoint"]="pilot-results/deeplabv3plus_pilot_best.pth"
+                  report["stages"]["validation_metrics_and_checkpoint"]="PASS"
+                  report["result"]="PASS"
+              except Exception as e:
+                  report.setdefault("errors",[]).append(f"{type(e).__name__}: {e}")
+                  report["result"]="FAIL"
+                  traceback.print_exc()
+                  raise
+              finally:
+                  Path("pilot-results").mkdir(exist_ok=True)
+                  Path("pilot-results/training_report.json").write_text(json.dumps(report,indent=2))
+                  print("PILOT REPORT")
+                  print(json.dumps(report,indent=2))
+          main()
+          PY
+          python /tmp/train_pilot.py
+
+      - name: Upload all test reports and pilot checkpoint
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bdd100k-remote-sample-report
-          path: bdd100k-report/
+          name: bdd100k-deeplabv3plus-readiness-pilot
+          path: |
+            pilot-results/
+            pilot-data/
           if-no-files-found: warn
           retention-days: 30
