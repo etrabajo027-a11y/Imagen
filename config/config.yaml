@@ -1,0 +1,41 @@
+project:
+  name: "urban-scene-segmentation"
+  task: "semantic_and_instance_segmentation"
+  seed: 42
+
+data:
+  dataset: null  # Por definir: Cityscapes, BDD100K o KITTI
+  root: "data"
+  image_size: [512, 1024]
+  classes:
+    - pedestrian
+    - vehicle
+    - cyclist
+    - traffic_sign
+    - lane
+
+preprocessing:
+  exposure_adjustment: false
+  gamma_correction: false
+  augmentations: []
+
+models:
+  semantic:
+    architecture: "DeepLabv3+"
+    pretrained: true
+  instance:
+    architecture: "Mask R-CNN"
+    pretrained: true
+
+training:
+  batch_size: 4
+  epochs: 20
+  learning_rate: 0.0001
+  num_workers: 2
+
+evaluation:
+  semantic_metrics:
+    - mIoU
+  instance_metrics:
+    - mAP
+  analyze_by_weather_condition: true
