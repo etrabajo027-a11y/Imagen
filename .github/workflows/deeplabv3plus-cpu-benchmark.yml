@@ -46,7 +46,7 @@ jobs:
       - name: Run DeepLabV3+ forward/backward benchmark
         run: |
           STEPS="${{ github.event.inputs.steps || '3' }}"
-          python scripts/benchmark_deeplabv3plus.py --steps "$STEPS" --batch-size 1 --height 288 --width 512
+          python scripts/benchmark_deeplabv3plus.py --steps "$STEPS" --batch-size 4 --height 288 --width 512
 
       - name: Upload benchmark report
         uses: actions/upload-artifact@v4
