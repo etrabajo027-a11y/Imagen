@@ -7,6 +7,7 @@ or end-to-end dataset performance.
 """
 import argparse
 import json
+import math
 import os
 import resource
 import time
@@ -124,7 +125,8 @@ def main():
 
     step_seconds = sum(durations) / len(durations)
     # Planning scenario discussed with the user: 800 train images, batch 1.
-    steps_per_epoch = 800
+    train_images = 800
+    steps_per_epoch = math.ceil(train_images / args.batch_size)
     epochs = 30
     report = {
         "device": str(device),
@@ -139,8 +141,11 @@ def main():
         "last_loss": losses[-1],
         "output_shape": list(out.shape),
         "max_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
-        "estimated_seconds_per_epoch_800_images_batch1": step_seconds * steps_per_epoch,
-        "estimated_hours_30_epochs_800_images_batch1":
+        "planning_train_images": train_images,
+        "planning_epochs": epochs,
+        "estimated_steps_per_epoch": steps_per_epoch,
+        "estimated_seconds_per_epoch": step_seconds * steps_per_epoch,
+        "estimated_hours_30_epochs":
             step_seconds * steps_per_epoch * epochs / 3600,
         "note": "Synthetic tensors; excludes BDD100K I/O, validation, checkpoints and setup."
     }
