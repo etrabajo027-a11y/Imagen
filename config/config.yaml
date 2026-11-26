@@ -4,15 +4,28 @@ project:
   seed: 42
 
 data:
-  dataset: null  # Por definir: Cityscapes, BDD100K o KITTI
-  root: "data"
+  dataset: "BDD100K"
+  root: "/content/drive/MyDrive/Imagenes_Tema2/data/bdd100k"
   image_size: [512, 1024]
-  classes:
+  semantic_segmentation:
+    images: "bdd100k/images/10k"
+    masks: "bdd100k/labels/sem_seg/masks"
+  instance_segmentation:
+    images: "bdd100k/images/10k"
+    annotations: "bdd100k/labels/ins_seg"
+  classes_to_verify_against_annotations:
     - pedestrian
     - vehicle
     - cyclist
     - traffic_sign
-    - lane
+  separate_100k_tasks:
+    lane_marking: "not_in_10k_semantic_or_instance_masks"
+    drivable_area: "not_in_10k_semantic_or_instance_masks"
+  environmental_metadata:
+    attributes: [weather, scene, timeofday]
+    join_key: "image_filename_or_id"
+    unmatched_value: "unknown"
+    verify_coverage_before_analysis: true
 
 preprocessing:
   exposure_adjustment: false
@@ -28,14 +41,16 @@ models:
     pretrained: true
 
 training:
-  batch_size: 4
+  batch_size: 2
   epochs: 20
   learning_rate: 0.0001
   num_workers: 2
+  use_mixed_precision: true
+  save_checkpoints_to_drive: true
+  start_with_subset: true
 
 evaluation:
-  semantic_metrics:
-    - mIoU
-  instance_metrics:
-    - mAP
+  semantic_metrics: [mIoU]
+  instance_metrics: [mAP]
   analyze_by_weather_condition: true
+  report_unknown_environmental_metadata: true
