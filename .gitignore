@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Entornos
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Datos y artefactos pesados
+data/raw/
+data/processed/
+*.zip
+*.tar
+*.tar.gz
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# Resultados generados
+results/*
+!results/README.md
+
+# Sistema/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Variables locales
+.env
