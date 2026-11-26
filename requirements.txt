@@ -1,0 +1,16 @@
+# Dependencias base para exploración, visión por computador y experimentación.
+# La versión de PyTorch debe instalarse según el sistema operativo y soporte CUDA:
+# https://pytorch.org/get-started/locally/
+
+torch
+torchvision
+numpy
+pandas
+matplotlib
+opencv-python
+Pillow
+scikit-learn
+albumentations
+PyYAML
+tqdm
+jupyter
