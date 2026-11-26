@@ -66,7 +66,7 @@ jobs:
               try:
                   names = entries_for(candidate)
                   report["archives"][candidate]["entry_count"] = len(names)
-                  candidates = [n for n in names if n.lower().endswith(".png") and ("train" in n.lower())]
+                  candidates = [n for n in names if n.lower().endswith("_train_id.png")]
                   print(candidate, "entries:", len(names), "| PNG train:", len(candidates), "| examples:", candidates[:3])
                   if candidates:
                       mask_archive, mask_names = candidate, candidates
@@ -118,7 +118,7 @@ jobs:
                       })
 
           report["sample_pairs_checked"] = len(checked)
-          report["mask_values_observed"] = sorted(int(x) for x in classes)
+          report["mask_values_observed"] = sorted(classes)
           report["sample"] = checked
           report["result"] = "PASS" if len(checked) == 50 else "PARTIAL"
           import os
