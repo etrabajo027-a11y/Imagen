@@ -47,8 +47,8 @@ jobs:
         with:
           name: deeplabv3plus-bdd100k-400train-100val-15epochs
           run-id: 45887532742
-          repository: \${{ github.repository }}
-          github-token: \${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
           path: training-results
 
       - name: Verify recoverable checkpoint and optimizer state
