@@ -1,43 +1,37 @@
 # Componentes pendientes: Mask R-CNN y análisis ambiental
 
-## Estado y alcance
+## Entrenamiento Mask R-CNN
 
-DeepLabV3+ ya está entrenado y evaluado en una muestra reducida de BDD100K. Esta fase incorpora pruebas técnicas para los componentes restantes, sin repetir ese entrenamiento.
+El workflow `Mask R-CNN BDD100K real-data training (CPU)` entrena una muestra controlada con imágenes y bitmasks oficiales de BDD100K. Parámetros iniciales: 100 imágenes train, 30 validation, 2 épocas, resolución 512×288, batch 1 y backbone ResNet-50-FPN con pesos COCO preentrenados. La finalidad de esta primera ejecución es obtener un modelo real reproducible dentro del límite de GitHub Actions; no equivale al entrenamiento completo de las 7.000 imágenes.
 
-## Segmentación por instancias
+El lector remoto usa HTTP Range/RemoteZip para leer únicamente las imágenes seleccionadas del ZIP de 10K y las máscaras correspondientes. No descarga ni almacena el ZIP completo. El ZIP de máscaras de instancias se localiza a partir del índice del servidor de datos y se verifica por estructura: debe contener bitmasks train y val.
 
-BDD100K publica un paquete independiente de Instance Segmentation (111 MB; MD5 oficial `651b41f229d7327d8c4af97772de4390`). Sus máscaras son PNG RGBA: R identifica la categoría, G codifica atributos (truncado, ocluido, crowd e ignore) y B contiene el identificador de instancia para esta tarea. Las ocho categorías evaluadas son pedestrian, rider, car, truck, bus, train, motorcycle y bicycle.
+## Formato de las máscaras de instancia
 
-No se deben reutilizar las máscaras semánticas como etiquetas de instancias. El flujo debe descargar el paquete de instancia, emparejar cada máscara con la imagen por nombre, excluir regiones crowd/ignore y construir máscaras binarias, cajas y etiquetas para Mask R-CNN.
+BDD100K almacena las máscaras como PNG RGBA:
+- R: categoría (1–8).
+- G: atributos; bit 0 = ignore, bit 1 = crowd, bit 2 = occluded, bit 3 = truncated.
+- B y A: identificador de instancia de 16 bits, calculado como `(B << 8) | A`.
+
+Se excluyen regiones crowd e ignore. Las ocho categorías son pedestrian, rider, car, truck, bus, train, motorcycle y bicycle. Las cajas se calculan a partir de las máscaras binarias.
+
+## Métricas
+
+El entrenamiento reporta AP50 y mAP@[.50:.95] mediante AP interpolada a 101 puntos sobre IoU de máscaras, por categoría y umbral. Esta implementación permite una evaluación local reproducible del subconjunto; no debe presentarse como resultado oficial del servidor BDD100K.
+
+## Comparación con DeepLabV3+
+
+- DeepLabV3+: mIoU y Pixel Accuracy en segmentación semántica.
+- Mask R-CNN: AP50 y mAP@[.50:.95] en segmentación por instancias.
+
+No se comparan mIoU y mAP como si fueran la misma métrica.
 
 ## Metadatos ambientales
 
-Los atributos oficiales son `weather`, `scene` y `timeofday`. Las imágenes 10K no son un subconjunto exacto de las 100K; por ello el análisis ambiental debe cruzar los nombres/IDs y reportar:
-- cobertura total y porcentaje de coincidencia;
-- número de imágenes por clima y hora del día;
-- resultados por subconjunto únicamente cuando exista etiqueta real;
-- categoría `unknown` para imágenes sin correspondencia.
+Los atributos oficiales `weather`, `scene` y `timeofday` deben cruzarse por nombre/ID. Las imágenes del paquete 10K no son un subconjunto exacto de 100K; se informará la cobertura y se conservarán las imágenes sin correspondencia como `unknown`. Los análisis por lluvia, niebla, noche y día solo se realizarán con etiquetas reales coincidentes.
 
-No se debe etiquetar lluvia, niebla o noche mediante inferencia visual o el nombre del archivo.
+## Fuentes oficiales
 
-## Prueba automatizada
-
-El workflow `Remaining components readiness` comprueba:
-1. decodificación de máscaras RGBA y separación de instancias;
-2. forward, cálculo de pérdidas, backward e inferencia de Mask R-CNN con nueve salidas (fondo + ocho categorías);
-3. unión de metadatos ambientales por nombre y conservación de valores desconocidos.
-
-Esta prueba es sintética: verifica el código y las formas de los tensores, pero **no constituye entrenamiento ni evaluación real en BDD100K**. La fase de entrenamiento real debe ejecutarse después de validar la estructura del ZIP oficial y sus emparejamientos.
-
-## Comparación de modelos
-
-DeepLabV3+ y Mask R-CNN resuelven tareas diferentes. Para la comparación se reportarán por separado:
-- DeepLabV3+: mIoU y Pixel Accuracy en máscaras semánticas.
-- Mask R-CNN: mAP@[.50:.95] y AP50 en instancias.
-
-No se deben comparar directamente los valores mIoU y mAP como si midieran lo mismo. La comparación cualitativa utilizará imágenes comunes, con predicción semántica y máscaras individuales superpuestas.
-
-## Fuente oficial
-
-- [Descarga y tamaños/checksums BDD100K](https://github.com/bdd100k/bdd100k/blob/master/doc/source/download.rst)
-- [Formato de etiquetas, categorías y canales RGBA](https://github.com/bdd100k/bdd100k/blob/master/doc/source/format.rst)
+- [Descarga, tamaños y checksums BDD100K](https://github.com/bdd100k/bdd100k/blob/master/doc/source/download.rst)
+- [Formato de etiquetas y canales RGBA](https://github.com/bdd100k/bdd100k/blob/master/doc/source/format.rst)
+- [Codificador oficial de bitmasks](https://github.com/bdd100k/bdd100k/blob/master/bdd100k/label/to_mask.py)
