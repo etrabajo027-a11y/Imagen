@@ -1,0 +1,51 @@
+name: Probe BDD100K instance-mask download sources
+
+on:
+  push:
+    paths:
+      - "scripts/probe_bdd100k_instance_sources.py"
+      - ".github/workflows/probe-bdd100k-instance-sources.yml"
+  workflow_dispatch:
+    inputs:
+      drive_file_url:
+        description: "Optional public Google Drive file link (leave blank to test known public sources)"
+        required: false
+        type: string
+      dataset_url:
+        description: "Optional direct ZIP URL from another mirror"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bdd100k-instance-source-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONUNBUFFERED: "1"
+      DRIVE_FILE_URL: ${{ inputs.drive_file_url }}
+      BDD100K_INSTANCE_URL: ${{ inputs.dataset_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install lightweight range-download tools
+        run: python -m pip install --upgrade pip requests remotezip
+      - name: Probe every candidate and verify archive structure
+        id: probe
+        run: python scripts/probe_bdd100k_instance_sources.py
+      - name: Upload source test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdd100k-instance-source-probe
+          path: instance-source-probe/
+          if-no-files-found: warn
+          retention-days: 30
