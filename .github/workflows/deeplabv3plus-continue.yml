@@ -1,0 +1,82 @@
+name: DeepLabV3+ continue training (reuse checkpoint, class balance)
+
+on:
+  push:
+    paths:
+      - ".github/workflows/deeplabv3plus-continue.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deeplabv3plus-checkpoint-continuation
+  cancel-in-progress: false
+
+jobs:
+  continue-training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+      TRAIN_SAMPLES: "800"
+      VAL_SAMPLES: "500"
+      EPOCHS: "3"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install remotezip pillow numpy
+
+      - name: Recover previous best and last checkpoints
+        uses: actions/download-artifact@v4
+        with:
+          name: deeplabv3plus-bdd100k-400train-100val-15epochs
+          run-id: 45887532742
+          repository: \${{ github.repository }}
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          path: training-results
+
+      - name: Verify recoverable checkpoint and optimizer state
+        run: |
+          python - <<'PY'
+          import torch, json
+          from pathlib import Path
+          for name in ("deeplabv3plus_best.pth", "deeplabv3plus_last.pth"):
+              p=Path("training-results")/name
+              if not p.is_file(): raise SystemExit(f"Missing {p}")
+              c=torch.load(p,map_location="cpu",weights_only=False)
+              assert c.get("num_classes")==19 and c.get("input_size")==[512,288]
+              print(name, "epoch=", c.get("epoch"), "optimizer=", "optimizer_state_dict" in c)
+              if name.endswith("_last.pth") and "optimizer_state_dict" not in c:
+                  raise SystemExit("Optimizer state absent: refusing to restart from scratch")
+          r=json.loads(Path("training-results/training_report.json").read_text())
+          assert r.get("status")=="PASS" and r.get("epochs_completed")==15
+          print("Original training artifact verified")
+          PY
+
+      - name: Continue from epoch 15 with 800 train and 500 validation images
+        run: python scripts/continue_deeplabv3plus.py
+
+      - name: Upload resumed model, history, and metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deeplabv3plus-bdd100k-resumed-800train-500val-18epochs
+          path: training-results/
+          if-no-files-found: error
+          retention-days: 30
