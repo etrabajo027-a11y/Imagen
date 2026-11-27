@@ -1,0 +1,83 @@
+name: DeepLabV3+ final evaluation (reuse trained checkpoint)
+
+on:
+  push:
+    paths:
+      - ".github/workflows/deeplabv3plus-evaluation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deeplabv3plus-final-evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU evaluation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install remotezip pillow numpy
+
+      - name: Download existing trained model artifact (no retraining)
+        uses: actions/download-artifact@v4
+        with:
+          name: deeplabv3plus-bdd100k-400train-100val-15epochs
+          run-id: 45887532742
+          repository: \${{ github.repository }}
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          path: training-results
+
+      - name: Verify recovered checkpoints and training metadata
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          required = [
+              "deeplabv3plus_best.pth",
+              "deeplabv3plus_last.pth",
+              "training_history.json",
+              "training_report.json",
+              "data_report.json",
+          ]
+          missing = [name for name in required if not (Path("training-results") / name).is_file()]
+          if missing:
+              raise SystemExit(f"Missing artifact files: {missing}")
+          report = json.loads(Path("training-results/training_report.json").read_text())
+          print(json.dumps(report, indent=2))
+          if report.get("status") != "PASS" or report.get("epochs_completed") != 15:
+              raise SystemExit("The recovered training report does not match the completed 15-epoch run")
+          print("Checkpoint artifact verification: PASS")
+          PY
+
+      - name: Evaluate best checkpoint on the exact 100-image validation sample
+        run: python scripts/evaluate_deeplabv3plus.py
+
+      - name: Upload final evaluation report and visual predictions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deeplabv3plus-final-evaluation-100val
+          path: evaluation-results/
+          if-no-files-found: error
+          retention-days: 30
