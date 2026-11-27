@@ -30,10 +30,11 @@ OUT=Path("maskrcnn-results"); OUT.mkdir(exist_ok=True)
 def stem(p): return PurePosixPath(p).stem
 
 def discover_instance_archive():
-    # Official BDD100K instance-label archive is hosted on the ETH/S3 release
-    # endpoint, not in the legacy Berkeley directory used for the 10K images.
+    # Current BDD100K documentation points to ETH Zurich's data mirror.
+    # Keep the historical S3 release URL as a fallback, since mirrors may differ.
     urls=[
-      "https://bdd-data-storage-release.s3.us-west-2.amazonaws.com/bdd100k/2021/bdd100k_ins_seg_labels_trainval.zip"
+      "https://dl.cv.ethz.ch/bdd100k/data/bdd100k_ins_seg_labels_trainval.zip",
+      "https://bdd-data-storage-release.s3.us-west-2.amazonaws.com/bdd100k/2021/bdd100k_ins_seg_labels_trainval.zip",
     ]
     errors=[]
     for url in urls:
