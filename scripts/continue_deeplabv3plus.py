@@ -144,7 +144,9 @@ def main():
     for group in optimizer.param_groups: group["lr"]=3e-5
     weights,counts=class_weights(train_ds)
     criterion=nn.CrossEntropyLoss(weight=weights,ignore_index=255)
-    start_epoch=int(checkpoint["epoch"]); best=float(checkpoint.get("metrics",{}).get("miou",0))
+    start_epoch=int(checkpoint["epoch"])
+    best_checkpoint=torch.load("training-results/deeplabv3plus_best.pth",map_location="cpu",weights_only=False)
+    best=float(best_checkpoint.get("metrics",{}).get("miou",0))
     best_path=Path("training-results/deeplabv3plus_best.pth")
     history_path=Path("training-results/continuation_history.json")
     history=[]
