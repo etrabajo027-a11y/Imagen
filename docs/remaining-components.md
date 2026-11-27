@@ -4,7 +4,7 @@
 
 El workflow `Mask R-CNN BDD100K real-data training (CPU)` entrena una muestra controlada con imágenes y bitmasks oficiales de BDD100K. Parámetros iniciales: 100 imágenes train, 30 validation, 2 épocas, resolución 512×288, batch 1 y backbone ResNet-50-FPN con pesos COCO preentrenados. La finalidad de esta primera ejecución es obtener un modelo real reproducible dentro del límite de GitHub Actions; no equivale al entrenamiento completo de las 7.000 imágenes.
 
-El lector remoto usa HTTP Range/RemoteZip para leer únicamente las imágenes seleccionadas del ZIP de 10K y las máscaras correspondientes. No descarga ni almacena el ZIP completo. El ZIP de máscaras de instancias se localiza a partir del índice del servidor de datos y se verifica por estructura: debe contener bitmasks train y val.
+El lector remoto usa HTTP Range/RemoteZip para leer únicamente las imágenes seleccionadas del ZIP de 10K y las máscaras correspondientes. No descarga ni almacena el ZIP completo. Las imágenes se leen desde el directorio Berkeley histórico y las máscaras desde el archivo oficial `bdd100k_ins_seg_labels_trainval.zip` del endpoint de publicación ETH/S3. El ZIP de máscaras se verifica por estructura: debe contener bitmasks train y val.
 
 ## Formato de las máscaras de instancia
 

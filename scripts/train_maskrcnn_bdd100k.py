@@ -30,26 +30,26 @@ OUT=Path("maskrcnn-results"); OUT.mkdir(exist_ok=True)
 def stem(p): return PurePosixPath(p).stem
 
 def discover_instance_archive():
-    r=requests.get(BASE,timeout=45); r.raise_for_status()
-    hrefs=re.findall(r'href=["\']([^"\']+\.zip)["\']',r.text,re.I)
-    names=list(dict.fromkeys(hrefs))
-    candidates=[n for n in names if re.search(r'(ins|instance|seg)',n,re.I)]
-    candidates += ["bdd100k_ins_seg_labels.zip","bdd100k_ins_seg.zip",
-      "bdd100k_instance_segmentation.zip","bdd100k_instance_seg.zip","bdd100k_ins_seg_labels_trainval.zip"]
-    seen=set()
-    for name in candidates:
-        name=name.rsplit("/",1)[-1]
-        if name in seen: continue
-        seen.add(name); url=urljoin(BASE,name)
+    # Official BDD100K instance-label archive is hosted on the ETH/S3 release
+    # endpoint, not in the legacy Berkeley directory used for the 10K images.
+    urls=[
+      "https://bdd-data-storage-release.s3.us-west-2.amazonaws.com/bdd100k/2021/bdd100k_ins_seg_labels_trainval.zip"
+    ]
+    errors=[]
+    for url in urls:
+        name=url.rsplit("/",1)[-1]
         try:
             with RemoteZip(url) as z:
                 files=z.namelist()
                 tr=[p for p in files if p.lower().endswith(".png") and "bitmasks" in p.lower() and "/train/" in ("/"+p.lower())]
                 va=[p for p in files if p.lower().endswith(".png") and "bitmasks" in p.lower() and "/val/" in ("/"+p.lower())]
-                if tr and va: return url,name,tr,va,names
+                if tr and va:
+                    print(f"Using official instance archive: {name}; train_masks={len(tr)}, val_masks={len(va)}",flush=True)
+                    return url,name,tr,va,urls
+                errors.append(f"{name}: ZIP opened but expected bitmasks/train and bitmasks/val paths were not found")
         except Exception as e:
-            print(f"Archive candidate unavailable: {name}: {type(e).__name__}: {e}",flush=True)
-    raise RuntimeError("Official instance bitmask ZIP not found. ZIP links in directory: "+repr(names))
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+    raise RuntimeError("Could not read official BDD100K instance-mask archive: "+"; ".join(errors))
 
 def decode_rgba(raw):
     a=np.asarray(raw.convert("RGBA"),dtype=np.uint8)
