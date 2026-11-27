@@ -50,8 +50,13 @@ Identificar y segmentar elementos relevantes de escenas urbanas y estudiar el co
 
 ## Reproducibilidad y alcance
 
-Registrar dataset, partición, clases, resolución, transformaciones, arquitectura, pesos iniciales, hiperparámetros, semilla, métricas y condiciones ambientales. No reportar métricas hasta ejecutar los experimentos. Los datos originales y pesos grandes no deben subirse a GitHub.
+Registrar dataset, partición, clases, resolución, transformaciones, arquitectura, pesos iniciales, hiperparámetros, semilla, métricas y condiciones ambientales. Los datos originales y pesos grandes no deben subirse a GitHub.
 
-## Estado
+## Estado del proyecto
 
-**Fase 1 — exploración:** notebook inicial creado; pendiente ejecutarlo en Colab y validar la estructura real descargada. Los resultados se incorporarán después de ejecutar los experimentos.
+- **DeepLabV3+ — experimento reducido:** completado con 400 imágenes TRAIN, 100 VAL y 15 épocas. Mejor mIoU: **36.57 %** (clases presentes); precisión por píxel: **87.34 %**.
+- **Evaluación del checkpoint:** completada. Se verificó la carga de los checkpoints `best` y `last`, y la presencia del estado del optimizador para reanudar entrenamiento. Se generaron métricas por clase, matriz de confusión y 12 ejemplos visuales.
+- **Limitación conocida:** el modelo aún presenta bajo rendimiento en varias clases minoritarias. El experimento reducido no equivale a entrenar con todo BDD100K.
+- **Informe técnico:** [docs/deeplabv3plus-evaluation.md](docs/deeplabv3plus-evaluation.md).
+- **Pendiente del proyecto global:** ejecutar el notebook de exploración en Colab, completar la evaluación con más datos si el presupuesto lo permite, y desarrollar/validar la segmentación por instancias con Mask R-CNN.
+- **Artefactos:** los modelos y resultados pesados permanecen como artefactos temporales de GitHub Actions; deben descargarse antes de su expiración.
